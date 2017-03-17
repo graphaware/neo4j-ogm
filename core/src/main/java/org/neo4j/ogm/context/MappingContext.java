@@ -15,7 +15,6 @@ package org.neo4j.ogm.context;
 
 import java.lang.reflect.Field;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArraySet;
 
 import org.neo4j.ogm.MetaData;
 import org.neo4j.ogm.classloader.MetaDataClassLoader;
@@ -66,7 +65,7 @@ public class MappingContext {
         this.relationshipEntityRegister = new EntityRegister<>();
         // NOTE: The use of CopyOnWriteArraySet here is to prevent ConcurrentModificationException from occurring when
         // the purge() method is called.
-        this.relationshipRegister = new CopyOnWriteArraySet<>();
+        this.relationshipRegister = new HashSet<>();
         this.labelHistoryRegister = new LabelHistoryRegister();
     }
 
@@ -102,10 +101,6 @@ public class MappingContext {
 
 
         return entity;
-    }
-
-    public boolean removeRelationship(MappedRelationship mappedRelationship) {
-        return relationshipRegister.remove(mappedRelationship);
     }
 
     /**
@@ -261,7 +256,7 @@ public class MappingContext {
         PropertyReader identityReader = EntityAccessManager.getIdentityPropertyReader(classInfo);
         Long id = (Long) identityReader.readProperty(entity);
 
-        purge(entity, identityReader, type);
+        purge(new SomethingHolder(entity, identityReader, type));
 
         if (id != null) {
             typeRegister.remove(metaData, type, id);
@@ -341,7 +336,7 @@ public class MappingContext {
     private void removeType(Class<?> type, PropertyReader identityReader) {
 
         for (Object entity : getEntities(type)) {
-            purge(entity, identityReader, type);
+            purge(new SomethingHolder(entity, identityReader, type));
         }
         typeRegister.delete(type);
     }
@@ -356,46 +351,71 @@ public class MappingContext {
      * on write (current implementation: inefficient).
      * TODO: The best way to fix this method is to replace it with an iterative approach using a <code>Stack</code> and
      * call remove() on the mappedRelationshipIterator. This will be both efficient and safe.
+     * @param somethingHolder
      */
-    private void purge(Object entity, PropertyReader identityReader, Class type) {
-        Long id = (Long) identityReader.readProperty(entity);
+    private void purge(SomethingHolder somethingHolder) {
+        Long id = somethingHolder.getId();
         if (id != null) {
-            // remove a NodeEntity
-            if (!metaData.isRelationshipEntity(type.getName())) {
-                if (nodeEntityRegister.contains(id)) {
-                    // remove the object from the node register
-                    nodeEntityRegister.remove(id);
-                    // remove all relationship mappings to/from this object
-                    Iterator<MappedRelationship> mappedRelationshipIterator = relationshipRegister.iterator();
-                    while (mappedRelationshipIterator.hasNext()) {
-                        MappedRelationship mappedRelationship = mappedRelationshipIterator.next();
-                        if (mappedRelationship.getStartNodeId() == id || mappedRelationship.getEndNodeId() == id) {
+            Stack<SomethingHolder> stack = new Stack<>();
+            stack.push(somethingHolder);
+            while(!stack.isEmpty()) {
+                somethingHolder = stack.pop();
+                // remove a NodeEntity
+                if (!metaData.isRelationshipEntity(somethingHolder.getType().getName())) {
+                    if (nodeEntityRegister.contains(id)) {
+                        // remove the object from the node register
+                        nodeEntityRegister.remove(id);
+                        // remove all relationship mappings to/from this object
+                        Iterator<MappedRelationship> mappedRelationshipIterator = relationshipRegister.iterator();
+                        while (mappedRelationshipIterator.hasNext()) {
+                            MappedRelationship mappedRelationship = mappedRelationshipIterator.next();
+                            if (mappedRelationship.getStartNodeId() == id || mappedRelationship.getEndNodeId() == id) {
 
-                            // first purge any RE mappings (if its a RE)
-                            if (mappedRelationship.getRelationshipId() != null) {
-                                Object relEntity = relationshipEntityRegister.get(mappedRelationship.getRelationshipId());
-                                if (relEntity != null) {
-                                    ClassInfo relClassInfo = metaData.classInfo(relEntity);
-                                    PropertyReader relIdentityReader = EntityAccessManager.getIdentityPropertyReader(relClassInfo);
-                                    purge(relEntity, relIdentityReader, relClassInfo.getUnderlyingClass());
+                                // first purge any RE mappings (if its a RE)
+                                if (mappedRelationship.getRelationshipId() != null) {
+                                    Object relEntity = relationshipEntityRegister.get(mappedRelationship.getRelationshipId());
+                                    if (relEntity != null) {
+                                        ClassInfo relClassInfo = metaData.classInfo(relEntity);
+                                        PropertyReader relIdentityReader = EntityAccessManager.getIdentityPropertyReader(relClassInfo);
+                                        stack.push(new SomethingHolder(relEntity, relIdentityReader, relClassInfo.getUnderlyingClass()));
+                                    }
                                 }
-                            }
 
-                            // finally remove the mapped relationship
-                            relationshipRegister.remove(mappedRelationship);
+                                // finally remove the mapped relationship
+                                mappedRelationshipIterator.remove();
+//                            relationshipRegister.remove(mappedRelationship);
+                            }
                         }
                     }
-                }
-            } else {
-                // remove a RelationshipEntity
-                if (relationshipEntityRegister.contains(id)) {
-                    relationshipEntityRegister.remove(id);
-                    RelationalReader startNodeReader = EntityAccessManager.getStartNodeReader(metaData.classInfo(entity));
-                    Object startNode = startNodeReader.read(entity);
-                    removeEntity(startNode);
-                    RelationalReader endNodeReader = EntityAccessManager.getEndNodeReader(metaData.classInfo(entity));
-                    Object endNode = endNodeReader.read(entity);
-                    removeEntity(endNode);
+                } else {
+                    // remove a RelationshipEntity
+                    if (relationshipEntityRegister.contains(id)) {
+                        relationshipEntityRegister.remove(id);
+                        RelationalReader startNodeReader = EntityAccessManager.getStartNodeReader(metaData.classInfo(somethingHolder.getEntity()));
+                        Object startNode = startNodeReader.read(somethingHolder.getEntity());
+                        Class<?> type1 = startNode.getClass();
+                        ClassInfo classInfo = metaData.classInfo(type1.getName());
+                        PropertyReader identityReader1 = EntityAccessManager.getIdentityPropertyReader(classInfo);
+                        Long id1 = (Long) identityReader1.readProperty(startNode);
+
+                        stack.push(new SomethingHolder(startNode, identityReader1, type1));
+
+                        if (id1 != null) {
+                            typeRegister.remove(metaData, type1, id1);
+                        }
+                        RelationalReader endNodeReader = EntityAccessManager.getEndNodeReader(metaData.classInfo(somethingHolder.getEntity()));
+                        Object endNode = endNodeReader.read(somethingHolder.getEntity());
+                        Class<?> type2 = endNode.getClass();
+                        ClassInfo classInfo1 = metaData.classInfo(type2.getName());
+                        PropertyReader identityReader2 = EntityAccessManager.getIdentityPropertyReader(classInfo1);
+                        Long id2 = (Long) identityReader2.readProperty(endNode);
+
+                        stack.push(new SomethingHolder(endNode, identityReader2, type2));
+
+                        if (id2 != null) {
+                            typeRegister.remove(metaData, type2, id2);
+                        }
+                    }
                 }
             }
         }
@@ -423,6 +443,45 @@ public class MappingContext {
             Collection<String> labels = (Collection<String>) reader.read(entity);
             Long id = (Long) EntityAccessManager.getIdentityPropertyReader(classInfo).readProperty(entity);
             labelHistory(id).push(labels);
+        }
+    }
+
+    private static class SomethingHolder {
+
+        private final Object entity;
+        private final PropertyReader identityReader;
+        private final Class type;
+
+        /**
+         */
+        private SomethingHolder(Object entity, PropertyReader identityReader, Class type) {
+            this.entity = entity;
+            this.identityReader = identityReader;
+            this.type = type;
+        }
+
+        public Object getEntity() {
+            return entity;
+        }
+
+        public PropertyReader getIdentityReader() {
+            return identityReader;
+        }
+
+        public Class getType() {
+            return type;
+        }
+
+        public Long getId() {
+            return (Long) identityReader.readProperty(entity);
+        }
+
+        @Override
+        public String toString() {
+            return "holder{" +
+                    "id=" + getIdentityReader().readProperty(entity) +
+                    ", type=" + type.getSimpleName() +
+                    '}';
         }
     }
 }

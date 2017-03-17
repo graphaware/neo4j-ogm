@@ -2,6 +2,7 @@ package org.neo4j.ogm.performance;
 
 import java.util.HashMap;
 
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.neo4j.ogm.session.Session;
@@ -39,6 +40,7 @@ public class PerformanceTest {
     @Test
     public void test() throws Exception {
 
-        session.query(Primary.class, "MATCH (n:Primary) WITH n MATCH path=(n)-[*0..]->() RETURN path", new HashMap());
+        Iterable res = session.query(Primary.class, "MATCH (n:Primary) WITH n MATCH path=(n)-[*0..]->() RETURN path", new HashMap());
+        Assert.assertTrue(res.iterator().hasNext());
     }
 }
